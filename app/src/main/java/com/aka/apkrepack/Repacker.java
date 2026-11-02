@@ -19,10 +19,12 @@ import java.security.KeyPairGenerator;
 import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.Enumeration;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -37,32 +39,14 @@ final class Repacker {
 
     private static final String ALIAS = "apkrepack_key";
 
-    static File repack(Context ctx, File inApk, String newPkg, String newLabel, Log log)
+    /** 単体APKでも、分割APK(複数ファイル)でも、全部同じパッケージ名・同じ署名にして返す。 */
+    static List<File> repackAll(Context ctx, List<File> ins, String newPkg, String newLabel, Log log)
             throws Exception {
         File dir = new File(ctx.getCacheDir(), "work");
+        deleteRec(dir);
         dir.mkdirs();
-        File unsigned = new File(dir, "unsigned.apk");
-        File out = new File(dir, newPkg + ".apk");
-        unsigned.delete();
-        out.delete();
-
-        try (ZipFile zf = new ZipFile(inApk)) {
-            ZipEntry me = zf.getEntry("AndroidManifest.xml");
-            if (me == null) {
-                throw new IOException("AndroidManifest.xml がありません（単体のAPKではありません）");
-            }
-            byte[] manifest;
-            try (InputStream is = zf.getInputStream(me)) {
-                manifest = readAll(is);
-            }
-            Axml ax = Axml.parse(manifest);
-            ax.patch(newPkg, newLabel);
-            byte[] patched = ax.build();
-            log.log("元のパッケージ名: " + ax.oldPackage);
-            log.log("新しいパッケージ名: " + newPkg);
-            writeAligned(zf, unsigned, patched);
-        }
-        log.log("書き換え完了。署名中…");
+        File outDir = new File(dir, "out");
+        outDir.mkdirs();
 
         KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
         ks.load(null);
@@ -83,20 +67,64 @@ final class Repacker {
         PrivateKey key = (PrivateKey) ks.getKey(ALIAS, null);
         X509Certificate cert = (X509Certificate) ks.getCertificate(ALIAS);
 
-        ApkSigner.SignerConfig sc = new ApkSigner.SignerConfig.Builder(
-                "repack", key, Collections.singletonList(cert)).build();
-        new ApkSigner.Builder(Collections.singletonList(sc))
-                .setInputApk(unsigned)
-                .setOutputApk(out)
-                .setV1SigningEnabled(true)
-                .setV2SigningEnabled(true)
-                .setV3SigningEnabled(true)
-                .setCreatedBy("ApkRepack")
-                .build()
-                .sign();
-        unsigned.delete();
-        log.log("署名完了: " + out.getName());
-        return out;
+        boolean multi = ins.size() > 1;
+        List<File> outs = new ArrayList<>();
+        for (int i = 0; i < ins.size(); i++) {
+            File in = ins.get(i);
+            File unsigned = new File(dir, i + ".unsigned");
+            File out = new File(outDir, multi ? in.getName() : newPkg + ".apk");
+            log.log("(" + (i + 1) + "/" + ins.size() + ") " + in.getName());
+
+            try (ZipFile zf = new ZipFile(in)) {
+                ZipEntry me = zf.getEntry("AndroidManifest.xml");
+                if (me == null) throw new IOException(in.getName() + " にAndroidManifest.xmlがありません");
+                byte[] manifest;
+                try (InputStream is = zf.getInputStream(me)) {
+                    manifest = readAll(is);
+                }
+                Axml ax = Axml.parse(manifest);
+                ax.inspect();
+                // アプリ名はメインのAPK(splitではないもの)にだけ付ける
+                ax.patch(newPkg, ax.splitName == null ? newLabel : null);
+                if (i == 0) log.log("元のパッケージ名: " + ax.oldPackage + " → " + newPkg);
+                writeAligned(zf, unsigned, ax.build());
+            }
+
+            ApkSigner.SignerConfig sc = new ApkSigner.SignerConfig.Builder(
+                    "repack", key, Collections.singletonList(cert)).build();
+            new ApkSigner.Builder(Collections.singletonList(sc))
+                    .setInputApk(unsigned)
+                    .setOutputApk(out)
+                    .setMinSdkVersion(26)
+                    .setV1SigningEnabled(true)
+                    .setV2SigningEnabled(true)
+                    .setV3SigningEnabled(true)
+                    .setCreatedBy("ApkRepack")
+                    .build()
+                    .sign();
+            unsigned.delete();
+            outs.add(out);
+        }
+        log.log("署名完了（" + outs.size() + "個）");
+        return outs;
+    }
+
+    static byte[] readManifest(File apk) throws IOException {
+        try (ZipFile zf = new ZipFile(apk)) {
+            ZipEntry me = zf.getEntry("AndroidManifest.xml");
+            if (me == null) throw new IOException("AndroidManifest.xml がありません");
+            try (InputStream is = zf.getInputStream(me)) {
+                return readAll(is);
+            }
+        }
+    }
+
+    private static void deleteRec(File f) {
+        if (f.isDirectory()) {
+            File[] c = f.listFiles();
+            if (c != null) for (File x : c) deleteRec(x);
+        }
+        f.delete();
     }
 
     private static boolean isSig(String name) {

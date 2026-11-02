@@ -43,6 +43,7 @@ final class Axml {
     private final List<Chunk> chunks = new ArrayList<>();
 
     String oldPackage;
+    String splitName;
 
     // ---------------------------------------------------------------- 読み込み
 
@@ -225,9 +226,7 @@ final class Axml {
 
     // ---------------------------------------------------------------- 書き換え
 
-    void patch(String newPkg, String newLabel) {
-        int androidNs = poolIdx.containsKey(ANDROID) ? poolIdx.get(ANDROID) : -1;
-
+    Elem inspect() {
         Elem manifest = null;
         for (Chunk c : chunks) {
             if (c.el != null && "manifest".equals(str(c.el.name))) {
@@ -237,11 +236,19 @@ final class Axml {
         }
         if (manifest == null) throw new IllegalArgumentException("manifest要素がありません");
         for (Attr a : manifest.attrs) {
-            if (a.ns < 0 && "package".equals(str(a.name))) {
-                oldPackage = str(a.raw >= 0 ? a.raw : a.data);
+            if (a.ns < 0) {
+                String an = str(a.name);
+                if ("package".equals(an)) oldPackage = str(a.raw >= 0 ? a.raw : a.data);
+                else if ("split".equals(an)) splitName = str(a.raw >= 0 ? a.raw : a.data);
             }
         }
         if (oldPackage == null) throw new IllegalArgumentException("パッケージ名が読めません");
+        return manifest;
+    }
+
+    void patch(String newPkg, String newLabel) {
+        int androidNs = poolIdx.containsKey(ANDROID) ? poolIdx.get(ANDROID) : -1;
+        inspect();
         final String old = oldPackage;
 
         Elem application = null;

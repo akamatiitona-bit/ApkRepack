@@ -7,12 +7,12 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageInstaller;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 import android.text.InputType;
-import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -26,9 +26,15 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.Enumeration;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Pattern;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+import java.util.zip.ZipOutputStream;
 
 public class MainActivity extends Activity {
     private static final int REQ_PICK = 1;
@@ -43,9 +49,10 @@ public class MainActivity extends Activity {
     private TextView infoTv, logTv;
     private Button buildBtn, installBtn, saveBtn;
 
-    private File inFile;
-    private File outFile;
-    private String origPkg, origLabel;
+    private List<File> inputs = new ArrayList<>();
+    private List<File> outputs = new ArrayList<>();
+    private String origPkg, origLabel, lastPkg;
+    private boolean obbFound;
 
     @Override
     protected void onCreate(Bundle b) {
@@ -55,7 +62,7 @@ public class MainActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(p, p * 2, p, p);
 
-        Button pick = button("① APKを選ぶ");
+        Button pick = button("① APKを選ぶ（apk / apks / xapk / apkm）");
         pick.setOnClickListener(v -> {
             Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             i.addCategory(Intent.CATEGORY_OPENABLE);
@@ -65,7 +72,7 @@ public class MainActivity extends Activity {
         root.addView(pick);
 
         infoTv = new TextView(this);
-        infoTv.setText("APKが選ばれていません");
+        infoTv.setText("ファイルが選ばれていません");
         infoTv.setPadding(0, p, 0, p);
         root.addView(infoTv);
 
@@ -90,13 +97,14 @@ public class MainActivity extends Activity {
         installBtn.setOnClickListener(v -> install());
         root.addView(installBtn);
 
-        saveBtn = button("APKとして保存");
+        saveBtn = button("ファイルとして保存");
         saveBtn.setEnabled(false);
         saveBtn.setOnClickListener(v -> {
             Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
             i.addCategory(Intent.CATEGORY_OPENABLE);
-            i.setType("application/vnd.android.package-archive");
-            i.putExtra(Intent.EXTRA_TITLE, outFile.getName());
+            i.setType(outputs.size() == 1
+                    ? "application/vnd.android.package-archive" : "application/octet-stream");
+            i.putExtra(Intent.EXTRA_TITLE, lastPkg + (outputs.size() == 1 ? ".apk" : ".apks"));
             startActivityForResult(i, REQ_SAVE);
         });
         root.addView(saveBtn);
@@ -132,12 +140,25 @@ public class MainActivity extends Activity {
         if (res != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
         if (req == REQ_PICK) {
-            loadApk(uri);
+            loadFile(uri);
         } else if (req == REQ_SAVE) {
             ex.execute(() -> {
-                try (InputStream is = new FileInputStream(outFile);
-                     OutputStream os = getContentResolver().openOutputStream(uri)) {
-                    copy(is, os);
+                try (OutputStream os = getContentResolver().openOutputStream(uri)) {
+                    if (outputs.size() == 1) {
+                        try (InputStream is = new FileInputStream(outputs.get(0))) {
+                            copy(is, os);
+                        }
+                    } else {
+                        try (ZipOutputStream zos = new ZipOutputStream(os)) {
+                            for (File f : outputs) {
+                                zos.putNextEntry(new ZipEntry(f.getName()));
+                                try (InputStream is = new FileInputStream(f)) {
+                                    copy(is, zos);
+                                }
+                                zos.closeEntry();
+                            }
+                        }
+                    }
                     ui.post(() -> Toast.makeText(this, "保存しました", Toast.LENGTH_SHORT).show());
                 } catch (Exception e) {
                     log("保存失敗: " + e);
@@ -146,7 +167,80 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void loadApk(Uri uri) {
+    private static String baseName(String path) {
+        int i = path.lastIndexOf('/');
+        return i >= 0 ? path.substring(i + 1) : path;
+    }
+
+    private static void deleteRec(File f) {
+        if (f.isDirectory()) {
+            File[] c = f.listFiles();
+            if (c != null) for (File x : c) deleteRec(x);
+        }
+        f.delete();
+    }
+
+    /** 単体APKならそのまま、apks/xapk/apkmなら中のAPKを全部取り出す。 */
+    private List<File> extractApks(File f) throws IOException {
+        File dir = new File(getCacheDir(), "splits");
+        deleteRec(dir);
+        dir.mkdirs();
+        List<File> res = new ArrayList<>();
+        obbFound = false;
+        try (ZipFile zf = new ZipFile(f)) {
+            if (zf.getEntry("AndroidManifest.xml") != null) {
+                res.add(f);
+                return res;
+            }
+            List<ZipEntry> es = new ArrayList<>();
+            Enumeration<? extends ZipEntry> en = zf.entries();
+            while (en.hasMoreElements()) {
+                ZipEntry e = en.nextElement();
+                String n = e.getName().toLowerCase();
+                if (e.isDirectory()) continue;
+                if (n.endsWith(".apk")) es.add(e);
+                else if (n.endsWith(".obb")) obbFound = true;
+            }
+            List<ZipEntry> pick = new ArrayList<>();
+            for (ZipEntry e : es) {
+                if (baseName(e.getName()).equalsIgnoreCase("universal.apk")) pick.add(e);
+            }
+            if (pick.isEmpty()) {
+                for (ZipEntry e : es) {
+                    String n = e.getName().toLowerCase();
+                    if (!n.contains("standalones/") && !n.contains("instant/")) pick.add(e);
+                }
+            }
+            if (pick.isEmpty()) pick = es;
+            int i = 0;
+            for (ZipEntry e : pick) {
+                String bn = baseName(e.getName()).replaceAll("[^A-Za-z0-9._-]", "_");
+                File o = new File(dir, (i++) + "_" + bn);
+                try (InputStream is = zf.getInputStream(e);
+                     OutputStream os = new FileOutputStream(o)) {
+                    copy(is, os);
+                }
+                res.add(o);
+            }
+        }
+        if (res.isEmpty()) throw new IOException("APKが見つかりません（対応していない形式です）");
+        return res;
+    }
+
+    /** この端末のCPUに合わないCPU用の分割ファイルかどうか。 */
+    private static boolean abiOk(String split) {
+        String s = split.toLowerCase().replace('-', '_');
+        String abi = null;
+        if (s.endsWith("arm64_v8a")) abi = "arm64-v8a";
+        else if (s.endsWith("armeabi_v7a")) abi = "armeabi-v7a";
+        else if (s.endsWith("x86_64")) abi = "x86_64";
+        else if (s.endsWith("x86")) abi = "x86";
+        if (abi == null) return true;
+        for (String a : Build.SUPPORTED_ABIS) if (a.equals(abi)) return true;
+        return false;
+    }
+
+    private void loadFile(Uri uri) {
         buildBtn.setEnabled(false);
         installBtn.setEnabled(false);
         saveBtn.setEnabled(false);
@@ -154,27 +248,63 @@ public class MainActivity extends Activity {
         infoTv.setText("読み込み中…");
         ex.execute(() -> {
             try {
-                File f = new File(getCacheDir(), "in.apk");
+                File f = new File(getCacheDir(), "in.bin");
                 try (InputStream is = getContentResolver().openInputStream(uri);
                      OutputStream os = new FileOutputStream(f)) {
                     copy(is, os);
                 }
-                PackageInfo pi = getPackageManager().getPackageArchiveInfo(f.getAbsolutePath(), 0);
-                if (pi == null) throw new IOException("APKとして読めません（.xapk/.apks は非対応です）");
-                ApplicationInfo ai = pi.applicationInfo;
-                ai.sourceDir = f.getAbsolutePath();
-                ai.publicSourceDir = f.getAbsolutePath();
-                CharSequence l = getPackageManager().getApplicationLabel(ai);
-                inFile = f;
-                origPkg = pi.packageName;
-                origLabel = String.valueOf(l);
+                List<File> all = extractApks(f);
+                List<File> use = new ArrayList<>();
+                int skipped = 0;
+                File base = null;
+                String pkg = null;
+                for (File a : all) {
+                    Axml ax = Axml.parse(Repacker.readManifest(a));
+                    ax.inspect();
+                    if (pkg == null) pkg = ax.oldPackage;
+                    if (ax.splitName == null) {
+                        if (base == null) base = a;
+                        use.add(a);
+                    } else if (abiOk(ax.splitName)) {
+                        use.add(a);
+                    } else {
+                        skipped++;
+                    }
+                }
+                String label = pkg;
+                if (base != null) {
+                    try {
+                        PackageInfo pi = getPackageManager()
+                                .getPackageArchiveInfo(base.getAbsolutePath(), 0);
+                        if (pi != null && pi.applicationInfo != null) {
+                            ApplicationInfo ai = pi.applicationInfo;
+                            ai.sourceDir = base.getAbsolutePath();
+                            ai.publicSourceDir = base.getAbsolutePath();
+                            label = String.valueOf(getPackageManager().getApplicationLabel(ai));
+                        }
+                    } catch (Throwable ignore) {
+                    }
+                }
+                inputs = use;
+                origPkg = pkg;
+                origLabel = label;
+                final int n = use.size();
+                final int sk = skipped;
+                final boolean noBase = base == null;
                 ui.post(() -> {
-                    infoTv.setText("元のアプリ名: " + origLabel + "\n元のパッケージ名: " + origPkg);
+                    StringBuilder sb = new StringBuilder();
+                    sb.append("元のアプリ名: ").append(origLabel)
+                            .append("\n元のパッケージ名: ").append(origPkg)
+                            .append("\nAPKの数: ").append(n);
+                    if (sk > 0) sb.append("（このスマホに合わないCPU用 ").append(sk).append("個は除外）");
+                    if (noBase) sb.append("\n注意: メインのAPKが見つかりません。入らない可能性があります");
+                    if (obbFound) sb.append("\n注意: obbデータ付きです。データは自動では入りません");
+                    infoTv.setText(sb.toString());
                     if (nameEt.getText().length() == 0) nameEt.setText(origLabel);
                     buildBtn.setEnabled(true);
                 });
-            } catch (Exception e) {
-                ui.post(() -> infoTv.setText("エラー: " + e.getMessage()));
+            } catch (Throwable e) {
+                ui.post(() -> infoTv.setText("エラー: " + e));
             }
         });
     }
@@ -204,11 +334,11 @@ public class MainActivity extends Activity {
         buildBtn.setEnabled(false);
         installBtn.setEnabled(false);
         saveBtn.setEnabled(false);
-        logTv.setText("作成中…（大きいAPKは少し時間がかかります）\n");
+        logTv.setText("作成中…（大きいAPKは時間がかかります）\n");
         ex.execute(() -> {
             try {
-                File out = Repacker.repack(this, inFile, fpkg, name, this::log);
-                outFile = out;
+                outputs = Repacker.repackAll(this, inputs, fpkg, name, this::log);
+                lastPkg = fpkg;
                 log("できました。③でインストールできます");
                 ui.post(() -> {
                     buildBtn.setEnabled(true);
@@ -223,7 +353,7 @@ public class MainActivity extends Activity {
     }
 
     private void install() {
-        if (outFile == null) return;
+        if (outputs.isEmpty()) return;
         if (!getPackageManager().canRequestPackageInstalls()) {
             toast("このアプリにインストールを許可してから、もう一度押してください");
             startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
@@ -237,10 +367,12 @@ public class MainActivity extends Activity {
                         PackageInstaller.SessionParams.MODE_FULL_INSTALL);
                 int id = pi.createSession(sp);
                 try (PackageInstaller.Session s = pi.openSession(id)) {
-                    try (OutputStream os = s.openWrite("app.apk", 0, outFile.length());
-                         InputStream is = new FileInputStream(outFile)) {
-                        copy(is, os);
-                        s.fsync(os);
+                    for (File f : outputs) {
+                        try (OutputStream os = s.openWrite(f.getName(), 0, f.length());
+                             InputStream is = new FileInputStream(f)) {
+                            copy(is, os);
+                            s.fsync(os);
+                        }
                     }
                     Intent i = new Intent(this, InstallResultReceiver.class);
                     PendingIntent pend = PendingIntent.getBroadcast(this, id, i,
