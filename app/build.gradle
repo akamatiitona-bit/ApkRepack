@@ -29,7 +29,7 @@ android {
     }
 
     defaultConfig {
-        applicationId 'com.aka.apkrepack'
+        applicationId 'com.aka.apkrepack2'
         minSdk 26
         targetSdk 34
         versionCode 901
