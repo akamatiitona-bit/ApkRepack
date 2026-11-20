@@ -45,13 +45,14 @@ public class MainActivity extends Activity {
     private final ExecutorService ex = Executors.newSingleThreadExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
 
-    private EditText nameEt, pkgEt;
+    private EditText nameEt, pkgEt, vcEt, vnEt;
     private TextView infoTv, logTv;
     private Button buildBtn, installBtn, saveBtn;
 
     private List<File> inputs = new ArrayList<>();
     private List<File> outputs = new ArrayList<>();
-    private String origPkg, origLabel, lastPkg;
+    private String origPkg, origLabel, lastPkg, origVn;
+    private Integer origVc;
     private boolean obbFound;
 
     @Override
@@ -86,6 +87,18 @@ public class MainActivity extends Activity {
         pkgEt.setSingleLine(true);
         pkgEt.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         root.addView(pkgEt);
+
+        vcEt = new EditText(this);
+        vcEt.setHint("versionCode（数字。空欄なら元のまま）");
+        vcEt.setSingleLine(true);
+        vcEt.setInputType(InputType.TYPE_CLASS_NUMBER);
+        root.addView(vcEt);
+
+        vnEt = new EditText(this);
+        vnEt.setHint("versionName（例: 1.1。空欄なら元のまま）");
+        vnEt.setSingleLine(true);
+        vnEt.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        root.addView(vnEt);
 
         buildBtn = button("② 別アプリ版を作る");
         buildBtn.setEnabled(false);
@@ -258,12 +271,18 @@ public class MainActivity extends Activity {
                 int skipped = 0;
                 File base = null;
                 String pkg = null;
+                Integer ovc = null;
+                String ovn = null;
                 for (File a : all) {
                     Axml ax = Axml.parse(Repacker.readManifest(a));
                     ax.inspect();
                     if (pkg == null) pkg = ax.oldPackage;
                     if (ax.splitName == null) {
-                        if (base == null) base = a;
+                        if (base == null) {
+                            base = a;
+                            ovc = ax.origVersionCode;
+                            ovn = ax.origVersionName;
+                        }
                         use.add(a);
                     } else if (abiOk(ax.splitName)) {
                         use.add(a);
@@ -288,6 +307,8 @@ public class MainActivity extends Activity {
                 inputs = use;
                 origPkg = pkg;
                 origLabel = label;
+                origVc = ovc;
+                origVn = ovn;
                 final int n = use.size();
                 final int sk = skipped;
                 final boolean noBase = base == null;
@@ -295,7 +316,13 @@ public class MainActivity extends Activity {
                     StringBuilder sb = new StringBuilder();
                     sb.append("元のアプリ名: ").append(origLabel)
                             .append("\n元のパッケージ名: ").append(origPkg)
+                            .append("\n元のversionCode: ").append(origVc == null ? "不明" : origVc)
+                            .append(" / versionName: ").append(origVn == null ? "不明" : origVn)
                             .append("\nAPKの数: ").append(n);
+                    vcEt.setHint("versionCode（元: " + (origVc == null ? "不明" : origVc)
+                            + "／空欄なら元のまま）");
+                    vnEt.setHint("versionName（元: " + (origVn == null ? "不明" : origVn)
+                            + "／空欄なら元のまま）");
                     if (sk > 0) sb.append("（このスマホに合わないCPU用 ").append(sk).append("個は除外）");
                     if (noBase) sb.append("\n注意: メインのAPKが見つかりません。入らない可能性があります");
                     if (obbFound) sb.append("\n注意: obbデータ付きです。データは自動では入りません");
@@ -329,6 +356,22 @@ public class MainActivity extends Activity {
             toast("元と同じパッケージ名です。違う名前にしてください");
             return;
         }
+        String vcs = vcEt.getText().toString().trim();
+        Integer vc = null;
+        if (!vcs.isEmpty()) {
+            try {
+                long v = Long.parseLong(vcs);
+                if (v < 1 || v > 2100000000L) throw new NumberFormatException();
+                vc = (int) v;
+            } catch (NumberFormatException e) {
+                toast("versionCodeは1〜2100000000の数字にしてください");
+                return;
+            }
+        }
+        String vn = vnEt.getText().toString().trim();
+        if (vn.isEmpty()) vn = null;
+        final Integer fvc = vc;
+        final String fvn = vn;
         final String fpkg = pkg;
         pkgEt.setText(fpkg);
         buildBtn.setEnabled(false);
@@ -337,7 +380,7 @@ public class MainActivity extends Activity {
         logTv.setText("作成中…（大きいAPKは時間がかかります）\n");
         ex.execute(() -> {
             try {
-                outputs = Repacker.repackAll(this, inputs, fpkg, name, this::log);
+                outputs = Repacker.repackAll(this, inputs, fpkg, name, fvc, fvn, this::log);
                 lastPkg = fpkg;
                 log("できました。③でインストールできます");
                 ui.post(() -> {

@@ -40,7 +40,8 @@ final class Repacker {
     private static final String ALIAS = "apkrepack_key";
 
     /** 単体APKでも、分割APK(複数ファイル)でも、全部同じパッケージ名・同じ署名にして返す。 */
-    static List<File> repackAll(Context ctx, List<File> ins, String newPkg, String newLabel, Log log)
+    static List<File> repackAll(Context ctx, List<File> ins, String newPkg, String newLabel,
+                                Integer newVersionCode, String newVersionName, Log log)
             throws Exception {
         File dir = new File(ctx.getCacheDir(), "work");
         deleteRec(dir);
@@ -85,8 +86,21 @@ final class Repacker {
                 Axml ax = Axml.parse(manifest);
                 ax.inspect();
                 // アプリ名はメインのAPK(splitではないもの)にだけ付ける
-                ax.patch(newPkg, ax.splitName == null ? newLabel : null);
-                if (i == 0) log.log("元のパッケージ名: " + ax.oldPackage + " → " + newPkg);
+                ax.patch(newPkg, ax.splitName == null ? newLabel : null,
+                        newVersionCode, newVersionName);
+                if (i == 0) {
+                    log.log("元のパッケージ名: " + ax.oldPackage + " → " + newPkg);
+                    if (newVersionCode != null) {
+                        log.log(ax.versionCodePatched
+                                ? "versionCode: " + ax.origVersionCode + " → " + newVersionCode
+                                : "注意: versionCodeを書き換えられませんでした（マニフェストに無い）");
+                    }
+                    if (newVersionName != null && !newVersionName.isEmpty()) {
+                        log.log(ax.versionNamePatched
+                                ? "versionName: " + ax.origVersionName + " → " + newVersionName
+                                : "注意: versionNameを書き換えられませんでした（マニフェストに無い）");
+                    }
+                }
                 writeAligned(zf, unsigned, ax.build());
             }
 

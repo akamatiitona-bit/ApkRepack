@@ -10,11 +10,15 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-/** バイナリ形式の AndroidManifest.xml を読み書きして、パッケージ名とアプリ名を書き換える。 */
+/** バイナリ形式の AndroidManifest.xml を読み書きして、パッケージ名・アプリ名・バージョンを書き換える。 */
 final class Axml {
     static final String ANDROID = "http://schemas.android.com/apk/res/android";
     static final int TYPE_STRING = 0x03;
+    static final int TYPE_INT_DEC = 0x10;
     static final int RES_LABEL = 0x01010001;
+    static final int RES_VERSION_CODE = 0x0101021b;
+    static final int RES_VERSION_NAME = 0x0101021c;
+    static final int RES_VERSION_CODE_MAJOR = 0x01010577;
 
     static final class Attr {
         int ns, name, raw, type, data;
@@ -44,6 +48,12 @@ final class Axml {
 
     String oldPackage;
     String splitName;
+    /** 元のversionCode / versionName（マニフェストに無ければnull） */
+    Integer origVersionCode;
+    String origVersionName;
+    /** patch()で実際に書き換えられたか */
+    boolean versionCodePatched;
+    boolean versionNamePatched;
 
     // ---------------------------------------------------------------- 読み込み
 
@@ -183,6 +193,16 @@ final class Axml {
         return (a.name >= 0 && a.name < resMap.length) ? resMap[a.name] : 0;
     }
 
+    private boolean isAndroidAttr(Attr a) {
+        return a.ns >= 0 && ANDROID.equals(str(a.ns));
+    }
+
+    /** リソースID（無ければ属性名）で属性を判定する。 */
+    private boolean isAttr(Attr a, int rid, String name) {
+        int r = resId(a);
+        return r == rid || (r == 0 && name.equals(str(a.name)));
+    }
+
     private static String expand(String v, String old) {
         if (v.isEmpty()) return v;
         if (v.startsWith(".")) return old + v;
@@ -240,16 +260,48 @@ final class Axml {
                 String an = str(a.name);
                 if ("package".equals(an)) oldPackage = str(a.raw >= 0 ? a.raw : a.data);
                 else if ("split".equals(an)) splitName = str(a.raw >= 0 ? a.raw : a.data);
+            } else if (isAndroidAttr(a)) {
+                if (isAttr(a, RES_VERSION_CODE, "versionCode")) {
+                    if (a.type == TYPE_INT_DEC) origVersionCode = a.data;
+                } else if (isAttr(a, RES_VERSION_NAME, "versionName")) {
+                    if (a.type == TYPE_STRING) origVersionName = str(a.data);
+                }
             }
         }
         if (oldPackage == null) throw new IllegalArgumentException("パッケージ名が読めません");
         return manifest;
     }
 
-    void patch(String newPkg, String newLabel) {
+    /**
+     * @param newVersionCode nullなら元のまま
+     * @param newVersionName nullまたは空なら元のまま
+     */
+    void patch(String newPkg, String newLabel, Integer newVersionCode, String newVersionName) {
         int androidNs = poolIdx.containsKey(ANDROID) ? poolIdx.get(ANDROID) : -1;
-        inspect();
+        Elem manifestEl = inspect();
         final String old = oldPackage;
+
+        // バージョン（分割APKは全部同じversionCodeでないと入らないので、全ファイルに同じ値を入れる）
+        versionCodePatched = false;
+        versionNamePatched = false;
+        for (Attr a : manifestEl.attrs) {
+            if (!isAndroidAttr(a)) continue;
+            if (newVersionCode != null && isAttr(a, RES_VERSION_CODE, "versionCode")) {
+                a.type = TYPE_INT_DEC;
+                a.raw = -1;
+                a.data = newVersionCode;
+                versionCodePatched = true;
+            } else if (newVersionCode != null
+                    && isAttr(a, RES_VERSION_CODE_MAJOR, "versionCodeMajor")) {
+                a.type = TYPE_INT_DEC; // 上位桁が残っていると意図した値にならないので0にする
+                a.raw = -1;
+                a.data = 0;
+            } else if (newVersionName != null && !newVersionName.isEmpty()
+                    && isAttr(a, RES_VERSION_NAME, "versionName")) {
+                setStr(a, newVersionName);
+                versionNamePatched = true;
+            }
+        }
 
         Elem application = null;
         Elem current = null;
