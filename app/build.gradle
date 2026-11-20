@@ -2,9 +2,31 @@ plugins {
     id 'com.android.application'
 }
 
+// 固定署名: 環境変数 KEYSTORE_PATH がある時だけ使う（GitHub Actionsで設定）。
+// 無い時は今まで通りAndroid標準のデバッグ署名になる。
+def ksPath = System.getenv('KEYSTORE_PATH')
+def hasKs = ksPath != null && new File(ksPath).exists()
+
 android {
     namespace 'com.aka.apkrepack'
     compileSdk 34
+
+    signingConfigs {
+        if (hasKs) {
+            fixed {
+                storeFile new File(ksPath)
+                storePassword System.getenv('KEYSTORE_PASSWORD')
+                keyAlias System.getenv('KEY_ALIAS')
+                keyPassword System.getenv('KEY_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            if (hasKs) signingConfig signingConfigs.fixed
+        }
+    }
 
     defaultConfig {
         applicationId 'com.aka.apkrepack'
